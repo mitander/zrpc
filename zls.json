@@ -1,10 +1,21 @@
 {
-    "enable_semantic_tokens": true,
     "enable_snippets": true,
-    "include_at_in_builtins": false,
-    "max_detail_length": 1048576,
-    "operator_completions": true,
+    "enable_argument_placeholders": true,
+    "completion_label_details": true,
+    "enable_build_on_save": false,
+    "build_on_save_args": [
+        "-Doptimize=Debug"
+    ],
+    "semantic_tokens": "full",
+    "inlay_hints_show_variable_type_hints": true,
+    "inlay_hints_show_struct_literal_field_type": true,
+    "inlay_hints_show_parameter_name": true,
+    "inlay_hints_show_builtin": true,
+    "inlay_hints_exclude_single_argument": false,
+    "inlay_hints_hide_redundant_param_names": false,
+    "force_autofix": false,
     "warn_style": false,
-    "zig_exe_path": "/Users/mitander/c/p/zrpc/zig/zig",
-    "zig_lib_path": "/Users/mitander/c/p/zrpc/zig/lib"
+    "highlight_global_var_declarations": true,
+    "skip_std_references": false,
+    "prefer_ast_check_as_child_process": true
 }
