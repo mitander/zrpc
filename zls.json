@@ -2,7 +2,7 @@
     "enable_snippets": true,
     "enable_argument_placeholders": true,
     "completion_label_details": true,
-    "enable_build_on_save": false,
+    "enable_build_on_save": true,
     "build_on_save_args": [
         "-Doptimize=Debug"
     ],
