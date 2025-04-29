@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
 
     // Testing
     const tests = b.addTest(.{
-        .root_source_file = b.path("src/zrpc.zig"),
+        .root_source_file = b.path("src/unit_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
