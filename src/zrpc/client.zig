@@ -1,28 +1,12 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
+const errors = @import("errors.zig");
+
+const ClientError = errors.ClientError;
 
 const log = std.log.scoped(.zrpc_client);
 
-// Define expected errors from transport methods used by client
-const ConnectError = anyerror;
-const ReceiveError = framing.FramingError;
-const SendError = std.posix.WriteError;
-
-// High-level client errors
-pub const ClientError = error{
-    ConnectionFailed,
-    WriteFailed,
-    ReadFailed,
-    FramingFailed,
-    DeserializeFailed,
-    ResponseErrorStatus,
-    RequestIdMismatch,
-    InvalidResponseFormat,
-    UnknownProcedure,
-};
-
-/// Generic Client struct - parameterized by transport connection type.
 pub fn Client(comptime ConnectionType: type) type {
     comptime {
         std.debug.assert(@hasDecl(ConnectionType, "send"));
@@ -37,7 +21,6 @@ pub fn Client(comptime ConnectionType: type) type {
 
         pub const Self = @This();
 
-        /// Establishes a connection using a provided connect function.
         pub fn connect(
             alloc: std.mem.Allocator,
             address: std.net.Address,
@@ -55,14 +38,12 @@ pub fn Client(comptime ConnectionType: type) type {
             };
         }
 
-        /// Closes the client connection.
         pub fn disconnect(self: *Self) void {
             log.debug("Client disconnecting.", .{});
             self.connection.close();
             log.info("Client disconnected.", .{});
         }
 
-        /// Generates the next unique request ID for this client instance.
         fn generate_request_id(self: *Self) u64 {
             const id = self.next_request_id;
             self.next_request_id +%= 1;
@@ -71,8 +52,7 @@ pub fn Client(comptime ConnectionType: type) type {
             return id;
         }
 
-        /// Performs the 'add' RPC call using the generic connection.
-        pub fn add(self: *Self, a: i32, b: i32) anyerror!i32 {
+        pub fn add(self: *Self, a: i32, b: i32) !i32 {
             const request_id = self.generate_request_id();
             const request_payload = protocol.AddRequest{ .a = a, .b = b };
             const request_header = protocol.MessageHeader{
@@ -102,19 +82,18 @@ pub fn Client(comptime ConnectionType: type) type {
                 return ClientError.FramingFailed;
             };
 
-            try self.connection.send(req_allocator, send_buffer.items) catch |send_err| {
-                log.err("add RPC call: Failed to send request (req_id={d}): {any}", .{ request_id, send_err });
+            self.connection.send(req_allocator, send_buffer.items) catch |err| {
+                log.err("add RPC call: Failed to send request (req_id={d}): {any}", .{ request_id, err });
                 return ClientError.WriteFailed;
             };
             log.debug("add RPC call: Request sent (req_id={d})", .{request_id});
 
             log.debug("add RPC call: Waiting for response (req_id={d})...", .{request_id});
-            const response_buffer = try self.connection.receive(self.allocator) catch |recv_err| {
-                log.err("add RPC call: Failed to receive response (req_id={d}): {any}", .{ request_id, recv_err });
-                return switch (recv_err) {
-                    error.IoError => ClientError.ReadFailed,
-                    error.AllocationFailed => ClientError.ReadFailed,
+            const response_buffer = self.connection.receive(self.allocator) catch |err| {
+                log.err("add RPC call: Failed to receive response (req_id={d}): {any}", .{ request_id, err });
+                return switch (err) {
                     error.MessageTooLarge => ClientError.FramingFailed,
+                    else => ClientError.ReadFailed,
                 };
             };
             defer self.allocator.free(response_buffer);
@@ -123,11 +102,11 @@ pub fn Client(comptime ConnectionType: type) type {
             var fixed_stream = std.io.fixedBufferStream(response_buffer);
             const reader = fixed_stream.reader();
 
-            const response_header = protocol.deserialize_message_header(reader) catch |e| {
-                log.err("add RPC call: Failed to deserialize response header (req_id={d}): {any}", .{ request_id, e });
-                return switch (e) {
-                    error.IoError => ClientError.ReadFailed,
+            const response_header = protocol.deserialize_message_header(reader) catch |err| {
+                log.err("add RPC call: Failed to deserialize response header (req_id={d}): {any}", .{ request_id, err });
+                return switch (err) {
                     error.InvalidFormat => ClientError.InvalidResponseFormat,
+                    else => ClientError.ReadFailed,
                 };
             };
             log.debug("add RPC call: Parsed response header (req_id={d}): {any}", .{ request_id, response_header });
@@ -143,14 +122,16 @@ pub fn Client(comptime ConnectionType: type) type {
 
             switch (response_header.status) {
                 .ok => {
-                    const response_payload = protocol.deserialize_add_response(reader) catch |e| {
-                        log.err("add RPC call: Failed to deserialize OK payload (req_id={d}): {any}", .{ request_id, e });
-                        return if (e == error.IoError) ClientError.ReadFailed else ClientError.InvalidResponseFormat;
+                    const response_payload = protocol.deserialize_add_response(reader) catch |err| {
+                        log.err("add RPC call: Failed to deserialize OK payload (req_id={d}): {any}", .{ request_id, err });
+                        return switch (err) {
+                            else => ClientError.DeserializeFailed,
+                        };
                     };
-                    _ = reader.readByte() catch |eof| {
-                        if (eof == error.EndOfStream) {
+                    _ = reader.readByte() catch |err| {
+                        if (err == error.EndOfStream) {
                             log.info("RPC Success! Result({d} + {d}): {d}", .{ a, b, response_payload.result });
-                            return response_payload.result; // SUCCESS
+                            return response_payload.result;
                         } else {
                             log.err("Trailing data after OK payload", .{});
                             return ClientError.InvalidResponseFormat;
@@ -160,8 +141,8 @@ pub fn Client(comptime ConnectionType: type) type {
                 },
                 .app_error => {
                     log.warn("add RPC call: Received AppError status from server (req_id={d}).", .{request_id});
-                    _ = reader.readByte() catch |eof| {
-                        if (eof != error.EndOfStream) {
+                    _ = reader.readByte() catch |err| {
+                        if (err != error.EndOfStream) {
                             log.err("Trailing data after AppError header", .{});
                             return ClientError.InvalidResponseFormat;
                         }
@@ -169,6 +150,7 @@ pub fn Client(comptime ConnectionType: type) type {
                     return ClientError.ResponseErrorStatus;
                 },
             }
+
             return ClientError.InvalidResponseFormat;
         }
     };

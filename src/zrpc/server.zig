@@ -4,24 +4,14 @@ const framing = @import("framing.zig");
 
 const log = std.log.scoped(.zrpc_server);
 
-// Define expected errors from transport methods used by server
-// These are placeholders; the actual errors depend on the specific ListenerType/ConnectionType used.
-// Using anyerror allows flexibility but hides details. For stdnet, we know the specific errors.
-const AcceptError = anyerror;
-const ReceiveError = framing.FramingError;
-const SendError = anyerror; // std.posix.WriteError for stdnet
-
-// Application handler interface
 pub const Handler = struct {
-    add_fn: *const fn (req: protocol.AddRequest) anyerror!protocol.AddResponse, // Allow app error
+    add_fn: *const fn (req: protocol.AddRequest) anyerror!protocol.AddResponse,
 };
 
-/// Generic Server struct - parameterized by transport types.
 pub fn Server(
     comptime ListenerType: type,
     comptime ConnectionType: type,
 ) type {
-    // Ensure the provided types have the methods we need (compile-time check)
     comptime {
         std.debug.assert(@hasDecl(ListenerType, "accept"));
         std.debug.assert(@hasDecl(ListenerType, "close"));
@@ -37,7 +27,6 @@ pub fn Server(
 
         pub const Self = @This();
 
-        /// Creates a new Server instance by listening on the given address.
         pub fn listen(
             alloc: std.mem.Allocator,
             handler_impl: Handler,
@@ -55,19 +44,17 @@ pub fn Server(
             };
         }
 
-        /// Shuts down the server by closing the listener.
         pub fn shutdown(self: *Self) void {
             log.debug("Server shutting down...", .{});
             self.listener.close();
             log.info("Server shutdown complete.", .{});
         }
 
-        /// Runs the main server loop, accepting and handling connections.
         pub fn run_blocking(self: *Self) !void {
             log.info("Server entering blocking accept loop...", .{});
             while (true) {
                 log.debug("Server waiting to accept connection...", .{});
-                const connection = try self.listener.accept(self.allocator) catch |err| {
+                const connection = self.listener.accept(self.allocator) catch |err| {
                     log.err("Accept failed: {any}, continuing", .{err});
                     continue;
                 };
@@ -77,7 +64,6 @@ pub fn Server(
     };
 }
 
-/// Generic function to handle a single connection.
 fn handle_connection(
     comptime ConnType: type,
     connection: *ConnType,
@@ -92,7 +78,7 @@ fn handle_connection(
 
     log.debug("Handling connection...", .{});
 
-    const request_buffer = try connection.receive(func_allocator) catch |err| {
+    const request_buffer = connection.receive(func_allocator) catch |err| {
         log.warn("Receive failed: {any}. Closing connection.", .{err});
         return;
     };
@@ -166,7 +152,6 @@ fn handle_connection(
     }
 }
 
-/// Generic helper to frame and send a response.
 fn send_response(
     comptime ConnType: type,
     connection: *const ConnType,
@@ -189,7 +174,7 @@ fn send_response(
         return;
     };
 
-    try connection.send(allocator, temp_buffer.items) catch |send_err| {
+    connection.send(allocator, temp_buffer.items) catch |send_err| {
         log.warn("Send Response: Network send failed: {any}", .{send_err});
     };
 }

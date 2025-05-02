@@ -3,7 +3,7 @@ const protocol = @import("protocol.zig");
 
 const log = std.log.scoped(.framing);
 
-pub const MAX_MESSAGE_SIZE: u32 = 1 * 1024 * 1024; // 1 MiB
+pub const MAX_MESSAGE_SIZE: u32 = 1 * 1024 * 1024;
 
 pub const FramingError = error{
     IoError,
@@ -11,15 +11,11 @@ pub const FramingError = error{
     MessageTooLarge,
 };
 
-/// Serializes header and optional payload into a temporary buffer, prepends the
-/// total length as a u32 prefix, and writes the result to the `transport_writer`.
-/// Uses the provided allocator for the temporary buffer.
-/// Returns FramingError or serialization error from serialize_payload_fn.
 pub fn write_framed_message(
     transport_writer: anytype,
     allocator: std.mem.Allocator,
     header: protocol.MessageHeader,
-    serialize_payload_fn: ?fn (anytype, anytype) anyerror!void, // Allow anyerror from payload fn
+    serialize_payload_fn: ?fn (anytype, anytype) anyerror!void,
     payload: anytype,
 ) FramingError!void {
     var temp_buffer = std.ArrayList(u8).init(allocator);
@@ -62,10 +58,6 @@ pub fn write_framed_message(
     log.debug("Wrote framed message: len={d}, header={any}", .{ message_len, header });
 }
 
-/// Reads the u32 length prefix, checks against MAX_MESSAGE_SIZE, allocates a buffer
-/// of that exact size using the provided allocator, and reads the full message
-/// body into the buffer. Caller owns the returned buffer.
-/// Returns `FramingError` on failure.
 pub fn read_framed_message(
     transport_reader: anytype,
     allocator: std.mem.Allocator,

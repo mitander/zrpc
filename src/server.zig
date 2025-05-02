@@ -7,7 +7,8 @@ const log = std.log.scoped(.server_main);
 const SERVER_ADDR = "127.0.0.1";
 const SERVER_PORT: u16 = 9000;
 
-/// Concrete implementation of the 'add' RPC method for our simple server.
+const StdnetServer = zrpc.Server(stdnet.Listener, stdnet.Connection);
+
 fn app_add(req: zrpc.protocol.AddRequest) !zrpc.protocol.AddResponse {
     log.debug("app_handler: Executing add({d}, {d})", .{ req.a, req.b });
     const result = std.math.add(i32, req.a, req.b) catch |err| {
@@ -19,7 +20,6 @@ fn app_add(req: zrpc.protocol.AddRequest) !zrpc.protocol.AddResponse {
     return zrpc.protocol.AddResponse{ .result = result };
 }
 
-// Wrapper function to match the expected 'anyerror' signature
 fn listen_wrapper(address: std.net.Address, options: std.net.Address.ListenOptions) anyerror!stdnet.Listener {
     const listener = stdnet.listen(address, options) catch |err| return err;
     return listener;
@@ -30,9 +30,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    log.info("--- Starting Zig RPC Server MVP (Generic) ---", .{});
-    log.info("Using StdNetTransport on {s}:{d}", .{ SERVER_ADDR, SERVER_PORT });
-
     const app_handler = zrpc.Handler{
         .add_fn = &app_add,
     };
@@ -42,8 +39,9 @@ pub fn main() !void {
         return error.InvalidAddress;
     };
 
-    const ConcreteServer = zrpc.Server(stdnet.Listener, stdnet.Connection);
-    var server = ConcreteServer.listen(
+    log.info("=== Starting RPC Server ===", .{});
+    log.info("Using transport: stdnet {s}:{d}", .{ SERVER_ADDR, SERVER_PORT });
+    var server = StdnetServer.listen(
         allocator,
         app_handler,
         address,
@@ -62,5 +60,6 @@ pub fn main() !void {
         return err;
     };
 
-    log.info("--- Server shutting down cleanly ---", .{});
+    log.info("=== Exiting RPC Server ===", .{});
+    server.shutdown();
 }

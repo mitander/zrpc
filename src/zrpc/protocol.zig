@@ -69,41 +69,36 @@ pub fn serialize_add_response(writer: anytype, res: AddResponse) !void {
     try writer.writeInt(i32, res.result, WIRE_ENDIAN);
 }
 
-pub const DeserializeError = error{
-    InvalidFormat,
-    IoError,
-};
-
-pub fn deserialize_message_header(reader: anytype) DeserializeError!MessageHeader {
+pub fn deserialize_message_header(reader: anytype) !MessageHeader {
     const request_id = reader.readInt(u64, WIRE_ENDIAN) catch |e| {
         log.debug("IO error reading request_id: {any}", .{e});
-        return DeserializeError.IoError;
+        return error.IoError;
     };
     const procedure_id = reader.readInt(u32, WIRE_ENDIAN) catch |e| {
         log.debug("IO error reading procedure_id: {any}", .{e});
-        return DeserializeError.IoError;
+        return error.IoError;
     };
     const status_byte = reader.readByte() catch |e| {
         log.debug("IO error reading status byte: {any}", .{e});
-        return DeserializeError.IoError;
+        return error.IoError;
     };
     const padding1 = reader.readByte() catch |e| {
         log.debug("IO error reading padding1: {any}", .{e});
-        return DeserializeError.IoError;
+        return error.IoError;
     };
     const padding2 = reader.readInt(u16, WIRE_ENDIAN) catch |e| {
         log.debug("IO error reading padding2: {any}", .{e});
-        return DeserializeError.IoError;
+        return error.IoError;
     };
 
     const status = Status.from_u8(status_byte) catch |e| {
         std.debug.assert(e == error.InvalidFormat);
-        return DeserializeError.InvalidFormat;
+        return error.InvalidFormat;
     };
 
     if (padding1 != 0 or padding2 != 0) {
         log.warn("Received non-zero value in header padding fields: p1={d}, p2={d}", .{ padding1, padding2 });
-        return DeserializeError.InvalidFormat;
+        return error.InvalidFormat;
     }
 
     return MessageHeader{
