@@ -8,23 +8,20 @@ const log = std.log.scoped(.stdnet);
 pub const Connection = struct {
     stream: std.net.Stream,
 
-    pub const Self = @This();
-
-    pub fn send(self: *const Self, allocator: std.mem.Allocator, buffer: []const u8) !void {
-        _ = allocator;
+    pub fn send(self: *Connection, _: std.mem.Allocator, buffer: []const u8) !void {
         log.debug("stdnet.send: writing {d} bytes", .{buffer.len});
         try self.stream.writer().writeAll(buffer);
         log.debug("stdnet.send: write complete", .{});
     }
 
-    pub fn receive(self: *Self, allocator: std.mem.Allocator) ![]u8 {
+    pub fn receive(self: *Connection, allocator: std.mem.Allocator) ![]u8 {
         log.debug("stdnet.receive: reading framed message", .{});
         const buffer = try framing.read_framed_message(self.stream.reader(), allocator);
         log.debug("stdnet.receive: read {d} bytes", .{buffer.len});
         return buffer;
     }
 
-    pub fn close(self: *Self) void {
+    pub fn close(self: *Connection) void {
         log.debug("stdnet.close(connection)", .{});
         self.stream.close();
     }
@@ -33,17 +30,15 @@ pub const Connection = struct {
 pub const Listener = struct {
     server: std.net.Server,
 
-    pub const Self = @This();
-
-    pub fn accept(self: *Self, allocator: std.mem.Allocator) !Connection {
-        _ = allocator;
+    pub fn accept(self: *Listener, _: std.mem.Allocator) !Connection {
         log.debug("stdnet.accept: waiting on {any}", .{self.server.listen_address});
+
         const server_conn = try self.server.accept();
         log.info("stdnet.accept: accepted from {any}", .{server_conn.address});
         return Connection{ .stream = server_conn.stream };
     }
 
-    pub fn close(self: *Self) void {
+    pub fn close(self: *Listener) void {
         log.debug("stdnet.close(listener) on {any}", .{self.server.listen_address});
         self.server.deinit();
     }
@@ -52,6 +47,7 @@ pub const Listener = struct {
 pub fn listen(address: std.net.Address, options: std.net.Address.ListenOptions) !Listener {
     log.debug("stdnet.listen: attempting on {any}", .{address});
     const server = try std.net.Address.listen(address, options);
+    std.debug.assert(server.listen_address.eql(address));
     log.info("stdnet.listen: success on {any}", .{server.listen_address});
     return Listener{ .server = server };
 }

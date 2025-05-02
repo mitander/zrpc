@@ -7,7 +7,7 @@ const log = std.log.scoped(.server_main);
 const SERVER_ADDR = "127.0.0.1";
 const SERVER_PORT: u16 = 9000;
 
-const StdnetServer = zrpc.Server(stdnet.Listener, stdnet.Connection);
+const Server = zrpc.ServerType(stdnet.Listener, stdnet.Connection);
 
 fn app_add(req: zrpc.protocol.AddRequest) !zrpc.protocol.AddResponse {
     log.debug("app_handler: Executing add({d}, {d})", .{ req.a, req.b });
@@ -16,12 +16,13 @@ fn app_add(req: zrpc.protocol.AddRequest) !zrpc.protocol.AddResponse {
         log.warn("app_handler: Add operation overflowed: a={d}, b={d}", .{ req.a, req.b });
         return error.Overflow;
     };
+    std.debug.assert(result == @as(i64, req.a) + @as(i64, req.b));
     log.debug("app_handler: Add result: {d}", .{result});
     return zrpc.protocol.AddResponse{ .result = result };
 }
 
 fn listen_wrapper(address: std.net.Address, options: std.net.Address.ListenOptions) anyerror!stdnet.Listener {
-    const listener = stdnet.listen(address, options) catch |err| return err;
+    const listener = try stdnet.listen(address, options);
     return listener;
 }
 
@@ -41,25 +42,20 @@ pub fn main() !void {
 
     log.info("=== Starting RPC Server ===", .{});
     log.info("Using transport: stdnet {s}:{d}", .{ SERVER_ADDR, SERVER_PORT });
-    var server = StdnetServer.listen(
+
+    var server = try Server.listen(
         allocator,
         app_handler,
         address,
         .{ .reuse_address = true },
         listen_wrapper,
-    ) catch |err| {
-        log.err("Failed to start server listener: {any}", .{err});
-        return err;
-    };
+    );
+    std.debug.assert(server.handler.add_fn == &app_add);
     defer server.shutdown();
 
     log.info("Server successfully listening on {any}", .{address});
 
-    server.run_blocking() catch |err| {
-        log.err("Server run_blocking exited with error: {any}", .{err});
-        return err;
-    };
+    try server.run_blocking();
 
-    log.info("=== Exiting RPC Server ===", .{});
-    server.shutdown();
+    log.info("=== Server main exiting normally (after run_blocking) ===", .{});
 }

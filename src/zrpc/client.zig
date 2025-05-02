@@ -7,7 +7,7 @@ const ClientError = errors.ClientError;
 
 const log = std.log.scoped(.zrpc_client);
 
-pub fn Client(comptime ConnectionType: type) type {
+pub fn ClientType(comptime ConnectionType: type) type {
     comptime {
         std.debug.assert(@hasDecl(ConnectionType, "send"));
         std.debug.assert(@hasDecl(ConnectionType, "receive"));
@@ -19,41 +19,51 @@ pub fn Client(comptime ConnectionType: type) type {
         allocator: std.mem.Allocator,
         next_request_id: u64 = 1,
 
-        pub const Self = @This();
+        const Client = @This();
 
         pub fn connect(
             alloc: std.mem.Allocator,
             address: std.net.Address,
             comptime connect_fn: fn (std.mem.Allocator, std.net.Address) anyerror!ConnectionType,
-        ) !Self {
+        ) !Client {
             log.debug("Client connecting to {any}...", .{address});
             const connection = connect_fn(alloc, address) catch |err| {
                 log.err("Client connect failed: {any}", .{err});
                 return ClientError.ConnectionFailed;
             };
             log.info("Client connected successfully.", .{});
-            return Self{
+
+            const client_instance = Client{
                 .connection = connection,
                 .allocator = alloc,
+                .next_request_id = 1,
             };
+            std.debug.assert(client_instance.next_request_id == 1);
+            return client_instance;
         }
 
-        pub fn disconnect(self: *Self) void {
+        pub fn disconnect(self: *Client) void {
             log.debug("Client disconnecting.", .{});
             self.connection.close();
             log.info("Client disconnected.", .{});
         }
 
-        fn generate_request_id(self: *Self) u64 {
+        fn generate_request_id(self: *Client) u64 {
+            std.debug.assert(self.next_request_id != 0);
+
             const id = self.next_request_id;
             self.next_request_id +%= 1;
             if (self.next_request_id == 0) self.next_request_id = 1;
+
             std.debug.assert(id != 0);
+            std.debug.assert(self.next_request_id != 0);
             return id;
         }
 
-        pub fn add(self: *Self, a: i32, b: i32) !i32 {
+        pub fn add(self: *Client, a: i32, b: i32) !i32 {
             const request_id = self.generate_request_id();
+            std.debug.assert(request_id != 0);
+
             const request_payload = protocol.AddRequest{ .a = a, .b = b };
             const request_header = protocol.MessageHeader{
                 .request_id = request_id,
@@ -62,6 +72,10 @@ pub fn Client(comptime ConnectionType: type) type {
                 ._padding1 = 0,
                 ._padding2 = 0,
             };
+            std.debug.assert(request_header._padding1 == 0 and request_header._padding2 == 0);
+            std.debug.assert(request_header.status == .ok);
+            std.debug.assert(request_header.request_id == request_id);
+            std.debug.assert(request_header.procedure_id == protocol.PROC_ID_ADD);
 
             log.debug("add RPC call: req_id={d}, payload={any}", .{ request_id, request_payload });
 
@@ -81,6 +95,7 @@ pub fn Client(comptime ConnectionType: type) type {
                 log.err("add RPC call: Failed to frame request (req_id={d}): {any}", .{ request_id, frame_err });
                 return ClientError.FramingFailed;
             };
+            std.debug.assert(send_buffer.items.len >= @sizeOf(protocol.MessageHeader));
 
             self.connection.send(req_allocator, send_buffer.items) catch |err| {
                 log.err("add RPC call: Failed to send request (req_id={d}): {any}", .{ request_id, err });
@@ -99,16 +114,19 @@ pub fn Client(comptime ConnectionType: type) type {
             defer self.allocator.free(response_buffer);
             log.debug("add RPC call: Received {d} response bytes (req_id={d})", .{ response_buffer.len, request_id });
 
+            if (response_buffer.len < @sizeOf(protocol.MessageHeader)) {
+                log.err("add RPC call: Response too small for header ({d} bytes)", .{response_buffer.len});
+                return ClientError.InvalidResponseFormat;
+            }
+
             var fixed_stream = std.io.fixedBufferStream(response_buffer);
             const reader = fixed_stream.reader();
 
             const response_header = protocol.deserialize_message_header(reader) catch |err| {
                 log.err("add RPC call: Failed to deserialize response header (req_id={d}): {any}", .{ request_id, err });
-                return switch (err) {
-                    error.InvalidFormat => ClientError.InvalidResponseFormat,
-                    else => ClientError.ReadFailed,
-                };
+                return ClientError.InvalidResponseFormat;
             };
+            std.debug.assert(response_header._padding1 == 0 and response_header._padding2 == 0);
             log.debug("add RPC call: Parsed response header (req_id={d}): {any}", .{ request_id, response_header });
 
             if (response_header.request_id != request_id) {
@@ -124,34 +142,35 @@ pub fn Client(comptime ConnectionType: type) type {
                 .ok => {
                     const response_payload = protocol.deserialize_add_response(reader) catch |err| {
                         log.err("add RPC call: Failed to deserialize OK payload (req_id={d}): {any}", .{ request_id, err });
-                        return switch (err) {
-                            else => ClientError.DeserializeFailed,
-                        };
+                        return ClientError.DeserializeFailed;
                     };
+
                     _ = reader.readByte() catch |err| {
                         if (err == error.EndOfStream) {
+                            std.debug.assert(err == error.EndOfStream);
                             log.info("RPC Success! Result({d} + {d}): {d}", .{ a, b, response_payload.result });
                             return response_payload.result;
                         } else {
-                            log.err("Trailing data after OK payload", .{});
+                            log.err("Trailing data or IO error after OK payload: {any}", .{err});
                             return ClientError.InvalidResponseFormat;
                         }
                     };
+                    log.err("Trailing data after OK payload", .{});
                     return ClientError.InvalidResponseFormat;
                 },
                 .app_error => {
                     log.warn("add RPC call: Received AppError status from server (req_id={d}).", .{request_id});
                     _ = reader.readByte() catch |err| {
                         if (err != error.EndOfStream) {
-                            log.err("Trailing data after AppError header", .{});
+                            log.err("Trailing data or IO error after AppError header: {any}", .{err});
                             return ClientError.InvalidResponseFormat;
                         }
+                        std.debug.assert(err == error.EndOfStream);
                     };
                     return ClientError.ResponseErrorStatus;
                 },
             }
-
-            return ClientError.InvalidResponseFormat;
+            @panic("Reached end of client add function unexpectedly");
         }
     };
 }

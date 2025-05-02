@@ -4,6 +4,7 @@ const stdnet = zrpc.stdnet;
 
 const log = std.log.scoped(.client_main);
 
+const Client = zrpc.ClientType(stdnet.Connection); // use stdnet
 const ClientError = zrpc.errors.ClientError;
 
 const SERVER_ADDR = "127.0.0.1";
@@ -21,7 +22,7 @@ pub fn main() !void {
         return error.InvalidAddress;
     };
 
-    var client = zrpc.Client(stdnet.Connection).connect(
+    var client = Client.connect(
         allocator,
         address,
         stdnet.connect,

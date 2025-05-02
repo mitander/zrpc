@@ -1,5 +1,7 @@
 const std = @import("std");
 const log = std.log.scoped(.protocol);
+const errors = @import("errors.zig");
+const SerializationError = errors.SerializationError;
 
 pub const WIRE_ENDIAN = std.builtin.Endian.little;
 
@@ -23,9 +25,8 @@ pub const MessageHeader = extern struct {
     _padding1: u8 = 0,
     _padding2: u16 = 0,
 
-    pub const SIZE = @sizeOf(MessageHeader);
     comptime {
-        std.debug.assert(SIZE == 16);
+        std.debug.assert(@sizeOf(MessageHeader) == 16);
     }
 };
 
@@ -35,24 +36,23 @@ pub const AddRequest = extern struct {
     a: i32,
     b: i32,
 
-    pub const SIZE = @sizeOf(AddRequest);
     comptime {
-        std.debug.assert(SIZE == 8);
+        std.debug.assert(@sizeOf(AddRequest) == 8);
     }
 };
 
 pub const AddResponse = extern struct {
     result: i32,
 
-    pub const SIZE = @sizeOf(AddResponse);
     comptime {
-        std.debug.assert(SIZE == 4);
+        std.debug.assert(@sizeOf(AddResponse) == 4);
     }
 };
 
 pub fn serialize_message_header(writer: anytype, header: MessageHeader) !void {
     std.debug.assert(header._padding1 == 0);
     std.debug.assert(header._padding2 == 0);
+
     try writer.writeInt(u64, header.request_id, WIRE_ENDIAN);
     try writer.writeInt(u32, header.procedure_id, WIRE_ENDIAN);
     try writer.writeByte(@intFromEnum(header.status));
@@ -70,44 +70,29 @@ pub fn serialize_add_response(writer: anytype, res: AddResponse) !void {
 }
 
 pub fn deserialize_message_header(reader: anytype) !MessageHeader {
-    const request_id = reader.readInt(u64, WIRE_ENDIAN) catch |e| {
-        log.debug("IO error reading request_id: {any}", .{e});
-        return error.IoError;
-    };
-    const procedure_id = reader.readInt(u32, WIRE_ENDIAN) catch |e| {
-        log.debug("IO error reading procedure_id: {any}", .{e});
-        return error.IoError;
-    };
-    const status_byte = reader.readByte() catch |e| {
-        log.debug("IO error reading status byte: {any}", .{e});
-        return error.IoError;
-    };
-    const padding1 = reader.readByte() catch |e| {
-        log.debug("IO error reading padding1: {any}", .{e});
-        return error.IoError;
-    };
-    const padding2 = reader.readInt(u16, WIRE_ENDIAN) catch |e| {
-        log.debug("IO error reading padding2: {any}", .{e});
-        return error.IoError;
-    };
-
-    const status = Status.from_u8(status_byte) catch |e| {
-        std.debug.assert(e == error.InvalidFormat);
-        return error.InvalidFormat;
-    };
+    const request_id = try reader.readInt(u64, WIRE_ENDIAN);
+    const procedure_id = try reader.readInt(u32, WIRE_ENDIAN);
+    const status_byte = try reader.readByte();
+    const padding1 = try reader.readByte();
+    const padding2 = try reader.readInt(u16, WIRE_ENDIAN);
+    const status = try Status.from_u8(status_byte);
 
     if (padding1 != 0 or padding2 != 0) {
         log.warn("Received non-zero value in header padding fields: p1={d}, p2={d}", .{ padding1, padding2 });
         return error.InvalidFormat;
     }
 
-    return MessageHeader{
+    const result = MessageHeader{
         .request_id = request_id,
         .procedure_id = procedure_id,
         .status = status,
         ._padding1 = padding1,
         ._padding2 = padding2,
     };
+
+    std.debug.assert(result._padding1 == 0);
+    std.debug.assert(result._padding2 == 0);
+    return result;
 }
 
 pub fn deserialize_add_request(reader: anytype) !AddRequest {
@@ -117,6 +102,6 @@ pub fn deserialize_add_request(reader: anytype) !AddRequest {
 }
 
 pub fn deserialize_add_response(reader: anytype) !AddResponse {
-    const result = try reader.readInt(i32, WIRE_ENDIAN);
-    return AddResponse{ .result = result };
+    const result_val = try reader.readInt(i32, WIRE_ENDIAN);
+    return AddResponse{ .result = result_val };
 }
