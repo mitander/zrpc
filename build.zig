@@ -43,15 +43,16 @@ pub fn build(b: *std.Build) void {
     server_exe.root_module.addImport("zrpc", lib);
 
     // Testing
-    const tests = b.addTest(.{
+    const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/unit_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
+    unit_tests.root_module.addImport("zrpc", lib);
 
     // Steps
     b.step("client", "Run client").dependOn(&b.addRunArtifact(client_exe).step);
     b.step("server", "Run server").dependOn(&b.addRunArtifact(server_exe).step);
-    b.step("test", "Run tests").dependOn(&b.addRunArtifact(tests).step);
+    b.step("test", "Run tests").dependOn(&b.addRunArtifact(unit_tests).step);
     b.step("check", "ReleaseSafe validation").dependOn(&safe_lib.step);
 }
