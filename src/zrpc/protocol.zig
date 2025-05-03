@@ -1,6 +1,7 @@
 const std = @import("std");
 const log = std.log.scoped(.protocol);
 const errors = @import("errors.zig");
+const framing = @import("framing.zig");
 const SerializationError = errors.SerializationError;
 
 pub const WIRE_ENDIAN = std.builtin.Endian.little;
