@@ -5,9 +5,7 @@ const testing = std.testing;
 
 const protocol = @import("protocol.zig");
 const snapshot = @import("testing/snapshot.zig");
-
-pub const WIRE_ENDIAN = std.builtin.Endian.little;
-pub const MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MiB Example
+const snap = snapshot.Snap.snap;
 
 pub const FramingError = error{
     IoError,
@@ -53,12 +51,12 @@ pub fn write_framed_message(
     }
 
     const message_len: u32 = @intCast(buffer.items.len);
-    if (message_len > MAX_MESSAGE_SIZE) {
-        std.log.err("Message body size ({d}) exceeds MAX_MESSAGE_SIZE ({d})", .{ message_len, MAX_MESSAGE_SIZE });
+    if (message_len > protocol.MAX_MESSAGE_SIZE) {
+        std.log.err("Message body size ({d}) exceeds MAX_MESSAGE_SIZE ({d})", .{ message_len, protocol.MAX_MESSAGE_SIZE });
         return FramingError.MessageTooLarge;
     }
 
-    writer.writeInt(u32, message_len, WIRE_ENDIAN) catch |err| {
+    writer.writeInt(u32, message_len, protocol.WIRE_ENDIAN) catch |err| {
         std.log.err("Failed to write message length prefix: {any}", .{err});
         return FramingError.WriteLengthFailed;
     };
@@ -73,7 +71,7 @@ pub fn read_framed_message(
     reader: anytype,
     allocator: mem.Allocator,
 ) FramingError![]u8 {
-    const message_len = reader.readInt(u32, WIRE_ENDIAN) catch |err| {
+    const message_len = reader.readInt(u32, protocol.WIRE_ENDIAN) catch |err| {
         if (err == error.EndOfStream) {
             std.log.warn("End of stream while reading message length.", .{});
             return FramingError.ReadLengthFailed;
@@ -90,7 +88,7 @@ pub fn read_framed_message(
         };
     }
 
-    if (message_len > MAX_MESSAGE_SIZE) {
+    if (message_len > protocol.MAX_MESSAGE_SIZE) {
         return FramingError.MessageTooLarge;
     }
 
@@ -107,11 +105,6 @@ pub fn read_framed_message(
     }
     return buffer;
 }
-
-// =============================================================================
-// Test Section
-// =============================================================================
-const snap = snapshot.Snap.snap;
 
 fn default_header(request_id: u64, procedure_id: u32, status: protocol.Status) protocol.MessageHeader {
     return protocol.MessageHeader{
@@ -134,7 +127,7 @@ test "framing: write and read empty message body" {
     const expected_frame_len_bytes = @as(u32, message_body_len);
     var expected_bytes_list = std.ArrayList(u8).init(testing.allocator);
     defer expected_bytes_list.deinit();
-    try expected_bytes_list.writer().writeInt(u32, expected_frame_len_bytes, WIRE_ENDIAN);
+    try expected_bytes_list.writer().writeInt(u32, expected_frame_len_bytes, protocol.WIRE_ENDIAN);
     try expected_bytes_list.writer().writeAll(std.mem.asBytes(&header_to_write));
 
     try testing.expectEqualSlices(u8, expected_bytes_list.items, stream_buffer.items);
@@ -146,7 +139,6 @@ test "framing: write and read empty message body" {
 
     try testing.expectEqualSlices(u8, std.mem.asBytes(&header_to_write), read_message_body);
 
-    // FIXED: Use readByte() for reliable EOF check
     try testing.expectError(error.EndOfStream, reader.readByte());
 }
 
@@ -178,42 +170,30 @@ test "framing: read zero length message" {
 
     try testing.expectEqualSlices(u8, &[_]u8{}, message_body);
 
-    // FIXED: Use readByte() for reliable EOF check
     var reader_after = stream.reader();
     try testing.expectError(error.EndOfStream, reader_after.readByte());
 }
 
 test "framing: read error MessageTooLarge" {
-    const bad_len = MAX_MESSAGE_SIZE + 1;
+    const bad_len = protocol.MAX_MESSAGE_SIZE + 1;
     var framed_bytes_buf: [4]u8 = undefined;
-    mem.writeInt(u32, &framed_bytes_buf, bad_len, WIRE_ENDIAN);
+    mem.writeInt(u32, &framed_bytes_buf, bad_len, protocol.WIRE_ENDIAN);
 
     var stream = io.fixedBufferStream(&framed_bytes_buf);
-    // No change needed here, assertion is correct, logs are acceptable.
     try testing.expectError(FramingError.MessageTooLarge, read_framed_message(stream.reader(), testing.allocator));
 }
 
 test "framing: read error ReadLengthFailed (EndOfStream during length read)" {
     const framed_bytes = [_]u8{};
     var stream = io.fixedBufferStream(&framed_bytes);
-
-    // No change needed here, assertion is correct.
     try testing.expectError(FramingError.ReadLengthFailed, read_framed_message(stream.reader(), testing.allocator));
 }
 
 test "framing: read error ReadBodyFailed (EndOfStream during body read)" {
     var framed_bytes_buf: [4]u8 = undefined;
-    mem.writeInt(u32, &framed_bytes_buf, 10, WIRE_ENDIAN); // Expect 10 bytes body
+    mem.writeInt(u32, &framed_bytes_buf, 10, protocol.WIRE_ENDIAN); // Expect 10 bytes body
 
     var stream = io.fixedBufferStream(&framed_bytes_buf); // But only provide 4 bytes
-
-    // FIXED: Capture result explicitly before checking error
     const result = read_framed_message(stream.reader(), testing.allocator);
     try testing.expectError(FramingError.ReadBodyFailed, result);
-
-    // If expectError passes, the error was returned, and the buffer should
-    // have been freed internally by read_framed_message's catch block.
-    // If expectError fails (meaning it succeeded returning a buffer),
-    // the test fails *before* reaching here, but the buffer would leak.
-    // Correcting the expectError usage ensures we correctly test the error path.
 }

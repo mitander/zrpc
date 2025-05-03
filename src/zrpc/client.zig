@@ -60,7 +60,7 @@ pub fn ClientType(comptime ConnectionType: type) type {
             return id;
         }
 
-        pub fn add(self: *Client, a: i32, b: i32) !i32 {
+        pub fn add(self: *Client, a: i32, b: i32) ClientError!i32 {
             const request_id = self.generate_request_id();
             std.debug.assert(request_id != 0);
 
@@ -69,10 +69,8 @@ pub fn ClientType(comptime ConnectionType: type) type {
                 .request_id = request_id,
                 .procedure_id = protocol.PROC_ID_ADD,
                 .status = .ok,
-                ._padding1 = 0,
-                ._padding2 = 0,
             };
-            std.debug.assert(request_header._padding1 == 0 and request_header._padding2 == 0);
+
             std.debug.assert(request_header.status == .ok);
             std.debug.assert(request_header.request_id == request_id);
             std.debug.assert(request_header.procedure_id == protocol.PROC_ID_ADD);
@@ -114,19 +112,14 @@ pub fn ClientType(comptime ConnectionType: type) type {
             defer self.allocator.free(response_buffer);
             log.debug("add RPC call: Received {d} response bytes (req_id={d})", .{ response_buffer.len, request_id });
 
-            if (response_buffer.len < @sizeOf(protocol.MessageHeader)) {
-                log.err("add RPC call: Response too small for header ({d} bytes)", .{response_buffer.len});
-                return ClientError.InvalidResponseFormat;
-            }
-
-            var fixed_stream = std.io.fixedBufferStream(response_buffer);
-            const reader = fixed_stream.reader();
-
-            const response_header = protocol.deserialize_message_header(reader) catch |err| {
-                log.err("add RPC call: Failed to deserialize response header (req_id={d}): {any}", .{ request_id, err });
+            const parsed_message = protocol.parse_message_body(response_buffer) catch |parse_err| {
+                log.err("add RPC call: Failed to parse response body (req_id={d}): {any}", .{ request_id, parse_err });
                 return ClientError.InvalidResponseFormat;
             };
-            std.debug.assert(response_header._padding1 == 0 and response_header._padding2 == 0);
+
+            const response_header = parsed_message.header;
+            const response_payload_slice = parsed_message.payload;
+
             log.debug("add RPC call: Parsed response header (req_id={d}): {any}", .{ request_id, response_header });
 
             if (response_header.request_id != request_id) {
@@ -140,16 +133,19 @@ pub fn ClientType(comptime ConnectionType: type) type {
 
             switch (response_header.status) {
                 .ok => {
-                    const response_payload = protocol.deserialize_add_response(reader) catch |err| {
+                    var payload_stream = std.io.fixedBufferStream(response_payload_slice);
+                    var payload_reader = payload_stream.reader();
+
+                    const response_payload = protocol.deserialize_add_response(payload_reader) catch |err| {
                         log.err("add RPC call: Failed to deserialize OK payload (req_id={d}): {any}", .{ request_id, err });
                         return ClientError.DeserializeFailed;
                     };
 
-                    _ = reader.readByte() catch |err| {
+                    _ = payload_reader.readByte() catch |err| {
                         if (err == error.EndOfStream) {
-                            std.debug.assert(err == error.EndOfStream);
-                            log.info("RPC Success! Result({d} + {d}): {d}", .{ a, b, response_payload.result });
-                            return response_payload.result;
+                            const result_value = response_payload.result;
+                            log.info("RPC Success! Result({d} + {d}): {d}", .{ a, b, result_value });
+                            return result_value;
                         } else {
                             log.err("Trailing data or IO error after OK payload: {any}", .{err});
                             return ClientError.InvalidResponseFormat;
@@ -158,19 +154,21 @@ pub fn ClientType(comptime ConnectionType: type) type {
                     log.err("Trailing data after OK payload", .{});
                     return ClientError.InvalidResponseFormat;
                 },
+
                 .app_error => {
+                    var payload_stream = std.io.fixedBufferStream(response_payload_slice);
+                    var payload_reader = payload_stream.reader();
+
                     log.warn("add RPC call: Received AppError status from server (req_id={d}).", .{request_id});
-                    _ = reader.readByte() catch |err| {
+                    _ = payload_reader.readByte() catch |err| {
                         if (err != error.EndOfStream) {
-                            log.err("Trailing data or IO error after AppError header: {any}", .{err});
+                            log.err("Unexpected payload or IO error after AppError header: {any}", .{err});
                             return ClientError.InvalidResponseFormat;
                         }
-                        std.debug.assert(err == error.EndOfStream);
                     };
                     return ClientError.ResponseErrorStatus;
                 },
             }
-            @panic("Reached end of client add function unexpectedly");
         }
     };
 }

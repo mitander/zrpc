@@ -6,3 +6,7 @@ pub const errors = @import("zrpc/errors.zig");
 pub const ClientType = @import("zrpc/client.zig").ClientType;
 pub const ServerType = @import("zrpc/server.zig").ServerType;
 pub const Handler = @import("zrpc/server.zig").Handler;
+
+const std = @import("std");
+pub const WIRE_ENDIAN = std.builtin.Endian.little;
+pub const PROC_ID_ADD: u32 = 1;
