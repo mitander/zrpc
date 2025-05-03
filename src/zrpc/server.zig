@@ -80,12 +80,12 @@ fn handle_connection(
     defer connection.close();
 
     while (true) {
-        var func_arena = std.heap.ArenaAllocator.init(allocator);
-        defer func_arena.deinit();
-        const func_allocator = func_arena.allocator();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
         log.debug("Handling request within connection...", .{});
-        const request_buffer = connection.receive(func_allocator) catch |err| {
+        const request_buffer = connection.receive(arena_allocator) catch |err| {
             log.info("Receive failed (client likely disconnected or bad frame): {any}. Closing connection.", .{err});
             break;
         };
@@ -109,7 +109,7 @@ fn handle_connection(
 
         switch (header.procedure_id) {
             protocol.PROC_ID_ADD => {
-                const request_payload = protocol.deserialize_add_request(payload_slice, func_allocator) catch |e| {
+                const request_payload = protocol.deserialize_add_request(payload_slice, arena_allocator) catch |e| {
                     log.err("Failed deserializing AddRequest: {any}. Closing connection.", .{e});
                     break;
                 };
@@ -124,7 +124,7 @@ fn handle_connection(
                         .status = .app_error,
                     };
                     log.warn("Handler returned AppError. Sending error response: {any}", .{err_header});
-                    send_response(ConnType, connection, func_allocator, err_header, null, {}) catch |send_err| {
+                    send_response(ConnType, connection, arena_allocator, err_header, null, {}) catch |send_err| {
                         log.warn("Failed sending AppError response (ignored): {any}", .{send_err});
                         break;
                     };
@@ -140,7 +140,7 @@ fn handle_connection(
                 send_response(
                     ConnType,
                     connection,
-                    func_allocator,
+                    arena_allocator,
                     ok_header,
                     protocol.serialize_add_response,
                     result,

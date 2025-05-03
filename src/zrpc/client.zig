@@ -19,7 +19,7 @@ pub fn ClientType(comptime ConnectionType: type) type {
         allocator: std.mem.Allocator,
         next_request_id: u64 = 1,
 
-        const Client = @This();
+        pub const Client = @This();
 
         pub fn connect(
             alloc: std.mem.Allocator,
@@ -104,10 +104,7 @@ pub fn ClientType(comptime ConnectionType: type) type {
             log.debug("add RPC call: Waiting for response (req_id={d})...", .{request_id});
             const response_buffer = self.connection.receive(self.allocator) catch |err| {
                 log.err("add RPC call: Failed to receive response (req_id={d}): {any}", .{ request_id, err });
-                return switch (err) {
-                    error.MessageTooLarge => ClientError.FramingFailed,
-                    else => ClientError.ReadFailed,
-                };
+                return ClientError.ReadFailed;
             };
             defer self.allocator.free(response_buffer);
             log.debug("add RPC call: Received {d} response bytes (req_id={d})", .{ response_buffer.len, request_id });

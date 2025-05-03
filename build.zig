@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
     opts.addOption(bool, "enable_logging", false);
     opts.addOption(bool, "enable_safety", true);
     safe_lib.root_module.addOptions("build_options", opts);
+    b.step("check", "ReleaseSafe validation").dependOn(&safe_lib.step);
 
     // Client executable
     const client_exe = b.addExecutable(.{
@@ -32,6 +33,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     client_exe.root_module.addImport("zrpc", lib);
+    b.step("client", "Run client").dependOn(&b.addRunArtifact(client_exe).step);
 
     // Server executable
     const server_exe = b.addExecutable(.{
@@ -41,8 +43,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     server_exe.root_module.addImport("zrpc", lib);
+    b.step("server", "Run server").dependOn(&b.addRunArtifact(server_exe).step);
 
-    // Testing
+    // Unit tests
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/unit_tests.zig"),
         .target = target,
@@ -50,9 +53,18 @@ pub fn build(b: *std.Build) void {
     });
     unit_tests.root_module.addImport("zrpc", lib);
 
-    // Steps
-    b.step("client", "Run client").dependOn(&b.addRunArtifact(client_exe).step);
-    b.step("server", "Run server").dependOn(&b.addRunArtifact(server_exe).step);
-    b.step("test", "Run tests").dependOn(&b.addRunArtifact(unit_tests).step);
-    b.step("check", "ReleaseSafe validation").dependOn(&safe_lib.step);
+    // Integration tests
+    const integration_tests = b.addTest(.{
+        .name = "integration-tests",
+        .root_source_file = b.path("src/integration_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    integration_tests.root_module.addImport("zrpc", lib);
+    const integration_test_step = b.addRunArtifact(integration_tests);
+
+    // Testing Step (both unit and integration tests)
+    const test_step = b.step("test", "Run unit and integration tests");
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    test_step.dependOn(&integration_test_step.step);
 }
