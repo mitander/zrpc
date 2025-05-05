@@ -12,7 +12,6 @@ pub const MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MiB Example
 
 pub const Status = enum(u8) {
     ok = 0,
-
     app_error,
 };
 
@@ -124,6 +123,24 @@ pub fn deserialize_add_response(
 
 test "protocol: MessageHeader size" {
     try testing.expectEqual(@as(usize, 16), @sizeOf(MessageHeader));
+}
+
+test "protocol: endianness conversion" {
+    const value: u32 = 0x12345678;
+    const expected_little_endian: u32 = 0x12345678; // Value stays the same for little-endian
+    const expected_big_endian: u32 = 0x78563412; // Byte-swapped value for big-endian
+
+    const wire_endian = if (std.builtin.Endian.little == WIRE_ENDIAN)
+        value
+    else
+        @byteSwap(value);
+    try testing.expectEqual(expected_little_endian, wire_endian);
+
+    const opposite_endian = if (std.builtin.Endian.little == WIRE_ENDIAN)
+        @byteSwap(value)
+    else
+        value;
+    try testing.expectEqual(expected_big_endian, opposite_endian);
 }
 
 test "protocol: parse_message_body basic" {
