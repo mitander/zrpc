@@ -8,7 +8,8 @@ const log = std.log.scoped(.stdnet);
 pub const Connection = struct {
     stream: std.net.Stream,
 
-    pub fn send(self: *Connection, _: std.mem.Allocator, buffer: []const u8) !void {
+    pub fn send(self: *Connection, allocator: std.mem.Allocator, buffer: []const u8) !void {
+        _ = allocator;
         log.debug("stdnet.send: writing {d} bytes", .{buffer.len});
         try self.stream.writer().writeAll(buffer);
         log.debug("stdnet.send: write complete", .{});
@@ -30,7 +31,8 @@ pub const Connection = struct {
 pub const Listener = struct {
     server: std.net.Server,
 
-    pub fn accept(self: *Listener, _: std.mem.Allocator) !Connection {
+    pub fn accept(self: *Listener, allocator: std.mem.Allocator) !Connection {
+        _ = allocator;
         log.debug("stdnet.accept: waiting on {any}", .{self.server.listen_address});
 
         const server_conn = try self.server.accept();
@@ -46,14 +48,18 @@ pub const Listener = struct {
 
 pub fn listen(address: std.net.Address, options: std.net.Address.ListenOptions) !Listener {
     log.debug("stdnet.listen: attempting on {any}", .{address});
+
     const server = try std.net.Address.listen(address, options);
     std.debug.assert(server.listen_address.eql(address));
+
     log.info("stdnet.listen: success on {any}", .{server.listen_address});
     return Listener{ .server = server };
 }
 
-pub fn connect(_: std.mem.Allocator, address: std.net.Address) !Connection {
+pub fn connect(allocator: std.mem.Allocator, address: std.net.Address) !Connection {
+    _ = allocator;
     log.debug("stdnet.connect: attempting to {any}", .{address});
+
     const stream = try std.net.tcpConnectToAddress(address);
     log.info("stdnet.connect: success", .{});
     return Connection{ .stream = stream };

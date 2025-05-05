@@ -1,11 +1,12 @@
 const std = @import("std");
+const framing = @import("../framing.zig");
+const protocol = @import("../protocol.zig");
+
 const mem = std.mem;
-const log = std.log.scoped(.sim);
 const assert = std.debug.assert;
 const testing = std.testing;
 
-const framing = @import("../framing.zig");
-const protocol = @import("../protocol.zig");
+const log = std.log.scoped(.sim);
 
 pub const SimConnection = struct {
     id: u64,
@@ -13,22 +14,17 @@ pub const SimConnection = struct {
     controller: *SimController,
     allocator: mem.Allocator,
 
-    const Self = @This();
-
-    pub fn send(self: *Self, allocator: mem.Allocator, message: []const u8) SimError!void {
+    pub fn send(self: *SimConnection, allocator: mem.Allocator, message: []const u8) SimError!void {
         const conn_state_ptr = self.controller.connections.getPtr(self.id);
         if (conn_state_ptr == null) {
             return SimError.InvalidConnectionId;
         }
         const conn_state = conn_state_ptr.?;
 
-        const target_queue: *ReceiveQueue = blk: {
-            if (self.is_client) {
-                break :blk &conn_state.client_queue;
-            } else {
-                break :blk &conn_state.server_queue;
-            }
-        };
+        const target_queue = if (self.is_client)
+            &conn_state.server_queue
+        else
+            &conn_state.client_queue;
 
         target_queue.mutex.lock();
         defer target_queue.mutex.unlock();
@@ -41,10 +37,10 @@ pub const SimConnection = struct {
         target_queue.cond.signal();
     }
 
-    pub fn receive(self: *Self, allocator: mem.Allocator) SimError![]u8 {
+    pub fn receive(self: *SimConnection, allocator: mem.Allocator) SimError![]u8 {
         log.debug("SimConnection.receive starting on connection {d}", .{self.id});
 
-        if (self.tryReceiveMessage(allocator)) |message| {
+        if (self.try_receive_message(allocator)) |message| {
             return message;
         } else |err| {
             if (err != SimError.WouldBlock) {
@@ -55,7 +51,7 @@ pub const SimConnection = struct {
         log.debug("No message immediately available, using timeout approach", .{});
         std.time.sleep(10 * std.time.ns_per_ms);
 
-        if (self.tryReceiveMessage(allocator)) |message| {
+        if (self.try_receive_message(allocator)) |message| {
             return message;
         } else |err| {
             if (err != SimError.WouldBlock) {
@@ -67,28 +63,22 @@ pub const SimConnection = struct {
         return SimError.ConnectionReset;
     }
 
-    fn tryReceiveMessage(self: *Self, allocator: mem.Allocator) SimError![]u8 {
+    fn try_receive_message(self: *SimConnection, allocator: mem.Allocator) SimError![]u8 {
         const conn_state_ptr = self.controller.connections.getPtr(self.id);
         if (conn_state_ptr == null) {
             return SimError.InvalidConnectionId;
         }
         const conn_state = conn_state_ptr.?;
 
-        const source_queue: *ReceiveQueue = blk: {
-            if (self.is_client) {
-                break :blk &conn_state.server_queue;
-            } else {
-                break :blk &conn_state.client_queue;
-            }
-        };
+        const source_queue = if (self.is_client)
+            conn_state.server_closed
+        else
+            conn_state.server_closed;
 
-        const self_closed_flag: bool = blk: {
-            if (self.is_client) {
-                break :blk conn_state.server_closed;
-            } else {
-                break :blk conn_state.client_closed;
-            }
-        };
+        const self_closed_flag = if (self.is_client)
+            conn_state.server_closed
+        else
+            conn_state.client_closed;
 
         source_queue.mutex.lock();
         defer source_queue.mutex.unlock();
@@ -108,7 +98,7 @@ pub const SimConnection = struct {
         };
     }
 
-    pub fn close(self: *Self) void {
+    pub fn close(self: *SimConnection) void {
         self.controller.close_connection(self.id, self.is_client, self.allocator);
     }
 };
@@ -116,13 +106,12 @@ pub const SimListener = struct {
     controller: *SimController,
     allocator: mem.Allocator,
 
-    const Self = @This();
-
-    pub fn accept(self: *Self, _: mem.Allocator) !SimConnection {
+    pub fn accept(self: *SimListener, allocator: mem.Allocator) !SimConnection {
+        _ = allocator;
         return self.controller.accept_connection(self.allocator);
     }
 
-    pub fn close(self: *Self) void {
+    pub fn close(self: *SimListener) void {
         self.controller.unregister_listener();
     }
 };
@@ -186,8 +175,6 @@ const PendingClient = struct {
 };
 
 pub const SimController = struct {
-    const Self = @This();
-
     allocator: mem.Allocator,
     mutex: std.Thread.Mutex = .{},
 
@@ -210,7 +197,7 @@ pub const SimController = struct {
         };
     }
 
-    pub fn listen(self: *Self, allocator: mem.Allocator) !SimListener {
+    pub fn listen(self: *SimController, allocator: mem.Allocator) !SimListener {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -231,7 +218,7 @@ pub const SimController = struct {
         };
     }
 
-    pub fn connect(self: *Self, allocator: mem.Allocator) !SimConnection {
+    pub fn connect(self: *SimController, allocator: mem.Allocator) !SimConnection {
         log.debug("Creating non-blocking SimConnection", .{});
         return SimConnection{
             .controller = self,
@@ -241,7 +228,7 @@ pub const SimController = struct {
         };
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *SimController) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -265,7 +252,7 @@ pub const SimController = struct {
         self.connections.deinit();
     }
 
-    pub fn register_listener(self: *Self) SimError!void {
+    pub fn register_listener(self: *SimController) SimError!void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.shutting_down) return SimError.ControllerShutdown;
@@ -278,7 +265,7 @@ pub const SimController = struct {
         }
     }
 
-    pub fn unregister_listener(self: *Self) void {
+    pub fn unregister_listener(self: *SimController) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (!self.listener_registered) return;
@@ -287,7 +274,7 @@ pub const SimController = struct {
         self.listener_wakeup.signal();
     }
 
-    pub fn init_connection(self: *Self, client_allocator: mem.Allocator) SimError!SimConnection {
+    pub fn init_connection(self: *SimController, client_allocator: mem.Allocator) SimError!SimConnection {
         var pending_entry = PendingClient{ .client_allocator = client_allocator };
 
         self.mutex.lock();
@@ -319,7 +306,7 @@ pub const SimController = struct {
         return pending_entry.established_conn.?;
     }
 
-    pub fn accept_connection(self: *Self, server_allocator: mem.Allocator) SimError!SimConnection {
+    pub fn accept_connection(self: *SimController, server_allocator: mem.Allocator) SimError!SimConnection {
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} starting accept_connection", .{thread_id});
         self.mutex.lock();
@@ -373,7 +360,7 @@ pub const SimController = struct {
         }
     }
 
-    pub fn send(self: *Self, conn_id: u64, sender_is_client: bool, buffer: []const u8) SimError!void {
+    pub fn send(self: *SimController, conn_id: u64, sender_is_client: bool, buffer: []const u8) SimError!void {
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} starting send for id {}", .{ thread_id, conn_id });
 
@@ -420,7 +407,7 @@ pub const SimController = struct {
         return;
     }
 
-    pub fn receive(self: *Self, conn_id: u64, is_client: bool) SimError![]u8 {
+    pub fn receive(self: *SimController, conn_id: u64, is_client: bool) SimError![]u8 {
         var queued_message: ?[]u8 = null;
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} starting receive for id {}", .{ thread_id, conn_id });
@@ -473,7 +460,7 @@ pub const SimController = struct {
         return queued_message.?;
     }
 
-    pub fn close_connection(self: *Self, conn_id: u64, closer_is_client: bool, allocator: mem.Allocator) void {
+    pub fn close_connection(self: *SimController, conn_id: u64, closer_is_client: bool, allocator: mem.Allocator) void {
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} closing connection {d}", .{ thread_id, conn_id });
 
