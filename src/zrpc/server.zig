@@ -175,7 +175,7 @@ fn send_response(
 
     defer temp_buffer.deinit();
 
-    framing.write_framed_message(
+    try framing.write_framed_message(
         temp_buffer.writer(),
         allocator,
         header,

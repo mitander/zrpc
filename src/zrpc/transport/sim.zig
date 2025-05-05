@@ -15,7 +15,7 @@ pub const SimConnection = struct {
 
     const Self = @This();
 
-    pub fn send(self: *Self, message: []const u8) SimError!void {
+    pub fn send(self: *Self, allocator: mem.Allocator, message: []const u8) SimError!void {
         const conn_state_ptr = self.controller.connections.getPtr(self.id);
         if (conn_state_ptr == null) {
             return SimError.InvalidConnectionId;
@@ -33,15 +33,41 @@ pub const SimConnection = struct {
         target_queue.mutex.lock();
         defer target_queue.mutex.unlock();
 
-        const message_buffer = try self.allocator.dupe(u8, message);
+        const message_buffer = try allocator.dupe(u8, message);
         target_queue.queue.append(message_buffer) catch |err| {
-            self.allocator.free(message_buffer);
+            allocator.free(message_buffer);
             return err;
         };
         target_queue.cond.signal();
     }
 
-    pub fn receive(self: *Self) SimError![]u8 {
+    pub fn receive(self: *Self, allocator: mem.Allocator) SimError![]u8 {
+        log.debug("SimConnection.receive starting on connection {d}", .{self.id});
+
+        if (self.tryReceiveMessage(allocator)) |message| {
+            return message;
+        } else |err| {
+            if (err != SimError.WouldBlock) {
+                return err;
+            }
+        }
+
+        log.debug("No message immediately available, using timeout approach", .{});
+        std.time.sleep(10 * std.time.ns_per_ms);
+
+        if (self.tryReceiveMessage(allocator)) |message| {
+            return message;
+        } else |err| {
+            if (err != SimError.WouldBlock) {
+                return err;
+            }
+        }
+
+        log.warn("SimConnection.receive timed out, returning ConnectionReset to avoid deadlock", .{});
+        return SimError.ConnectionReset;
+    }
+
+    fn tryReceiveMessage(self: *Self, allocator: mem.Allocator) SimError![]u8 {
         const conn_state_ptr = self.controller.connections.getPtr(self.id);
         if (conn_state_ptr == null) {
             return SimError.InvalidConnectionId;
@@ -67,15 +93,16 @@ pub const SimConnection = struct {
         source_queue.mutex.lock();
         defer source_queue.mutex.unlock();
 
-        while (source_queue.queue.items.len == 0) {
-            if (self_closed_flag or self.controller.shutting_down) {
-                return SimError.ConnectionReset;
-            }
-            source_queue.cond.wait(&source_queue.mutex);
+        if (self_closed_flag or self.controller.shutting_down) {
+            return SimError.ConnectionReset;
+        }
+
+        if (source_queue.queue.items.len == 0) {
+            return SimError.WouldBlock;
         }
 
         const message_buffer = source_queue.queue.orderedRemove(0);
-        return self.allocator.dupe(u8, message_buffer) catch |err| {
+        return allocator.dupe(u8, message_buffer) catch |err| {
             source_queue.queue.append(message_buffer) catch unreachable;
             return err;
         };
@@ -109,6 +136,7 @@ pub const SimError = error{
     ControllerShutdown,
     InvalidConnectionId,
     InternalStateError,
+    WouldBlock,
 };
 
 const ReceiveQueue = struct {
@@ -179,6 +207,37 @@ pub const SimController = struct {
             .allocator = allocator,
             .pending_clients = std.ArrayList(*PendingClient).init(allocator),
             .connections = std.AutoHashMap(u64, ConnectionState).init(allocator),
+        };
+    }
+
+    pub fn listen(self: *Self, allocator: mem.Allocator) !SimListener {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.shutting_down) {
+            return SimError.ControllerShutdown;
+        }
+
+        if (self.listener_registered) {
+            return SimError.ListenerAlreadyRegistered;
+        }
+
+        self.listener_registered = true;
+        log.debug("Creating SimListener for controller at {*}", .{self});
+
+        return SimListener{
+            .controller = self,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn connect(self: *Self, allocator: mem.Allocator) !SimConnection {
+        log.debug("Creating non-blocking SimConnection", .{});
+        return SimConnection{
+            .controller = self,
+            .allocator = allocator,
+            .id = self.next_conn_id,
+            .is_client = true,
         };
     }
 
@@ -317,55 +376,44 @@ pub const SimController = struct {
     pub fn send(self: *Self, conn_id: u64, sender_is_client: bool, buffer: []const u8) SimError!void {
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} starting send for id {}", .{ thread_id, conn_id });
-        const buffer_copy = try self.allocator.dupe(u8, buffer);
-        errdefer self.allocator.free(buffer_copy);
+
+        const copied_buffer = self.allocator.dupe(u8, buffer) catch |err| {
+            log.err("Thread {d} failed to dupe buffer: {any}", .{ thread_id, err });
+            return err;
+        };
+        errdefer self.allocator.free(copied_buffer);
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
         if (self.shutting_down) {
-            self.allocator.free(buffer_copy);
             log.info("Thread {d} controller is shutting down during send", .{thread_id});
             return SimError.ControllerShutdown;
         }
 
         const conn_state_ptr = self.connections.getPtr(conn_id);
         if (conn_state_ptr == null) {
-            self.allocator.free(buffer_copy);
             log.info("Thread {d} connection not found", .{thread_id});
             return SimError.InvalidConnectionId;
         }
-        const conn_state = conn_state_ptr.?;
+        var conn_state = conn_state_ptr.?;
 
-        const target_queue: *ReceiveQueue = blk: {
-            if (sender_is_client) {
-                break :blk &conn_state.server_queue;
-            } else {
-                break :blk &conn_state.client_queue;
-            }
-        };
+        var target_queue = if (sender_is_client)
+            &conn_state.server_queue
+        else
+            &conn_state.client_queue;
 
-        const receiver_closed: bool = blk: {
-            if (sender_is_client) {
-                break :blk conn_state.server_closed;
-            } else {
-                break :blk conn_state.client_closed;
-            }
-        };
+        const receiver_closed = if (sender_is_client)
+            conn_state.server_closed
+        else
+            conn_state.client_closed;
 
         if (receiver_closed) {
-            self.allocator.free(buffer_copy);
             log.info("Thread {d} receiver is closed", .{thread_id});
             return SimError.ConnectionReset;
         }
 
-        // Release connections_mutex before locking queue mutex
-        self.mutex.unlock();
-
-        target_queue.mutex.lock();
-        defer target_queue.mutex.unlock();
-
-        try target_queue.queue.append(buffer_copy);
+        try target_queue.queue.append(copied_buffer);
         target_queue.cond.signal();
 
         log.info("Thread {d} sent message", .{thread_id});
@@ -373,6 +421,7 @@ pub const SimController = struct {
     }
 
     pub fn receive(self: *Self, conn_id: u64, is_client: bool) SimError![]u8 {
+        var queued_message: ?[]u8 = null;
         const thread_id = std.Thread.getCurrentId();
         log.info("Thread {d} starting receive for id {}", .{ thread_id, conn_id });
 
@@ -380,7 +429,7 @@ pub const SimController = struct {
         defer self.mutex.unlock();
 
         if (self.shutting_down) {
-            log.info("Thread {d} controller is shutting down during receive", .{thread_id});
+            log.info("Thread {d} controller is shutting down", .{thread_id});
             return SimError.ControllerShutdown;
         }
 
@@ -389,49 +438,44 @@ pub const SimController = struct {
             log.info("Thread {d} connection not found", .{thread_id});
             return SimError.InvalidConnectionId;
         }
-        const conn_state = conn_state_ptr.?;
+        var conn_state = conn_state_ptr.?;
 
-        const source_queue: *ReceiveQueue = blk: {
-            if (is_client) {
-                break :blk &conn_state.server_queue;
-            } else {
-                break :blk &conn_state.client_queue;
-            }
-        };
+        var source_queue = if (is_client)
+            &conn_state.server_queue
+        else
+            &conn_state.client_queue;
 
-        const self_closed_flag: bool = blk: {
-            if (is_client) {
-                break :blk conn_state.server_closed;
-            } else {
-                break :blk conn_state.client_closed;
-            }
-        };
+        const is_closed = if (is_client)
+            conn_state.server_closed
+        else
+            conn_state.client_closed;
 
-        // Release connections_mutex before locking queue mutex
-        self.mutex.unlock();
-        defer self.mutex.lock();
-
-        source_queue.mutex.lock();
-        defer source_queue.mutex.unlock();
-
-        while (source_queue.queue.items.len == 0) {
-            if (self_closed_flag or self.shutting_down) {
-                log.info("Thread {d} connection is closed or shutting down", .{thread_id});
-                return SimError.ConnectionReset;
-            }
-            source_queue.cond.wait(&source_queue.mutex);
+        if (is_closed) {
+            log.info("Thread {d} connection is closed", .{thread_id});
+            return SimError.ConnectionReset;
         }
 
-        const message_buffer = source_queue.queue.orderedRemove(0);
-        return self.allocator.dupe(u8, message_buffer) catch |err| {
-            source_queue.queue.append(message_buffer) catch unreachable;
-            return err;
-        };
+        if (source_queue.queue.items.len > 0) {
+            const message_buffer = source_queue.queue.orderedRemove(0);
+            queued_message = self.allocator.dupe(u8, message_buffer) catch |err| {
+                log.err("Thread {d} failed to dupe message buffer: {any}", .{ thread_id, err });
+                source_queue.queue.append(message_buffer) catch {};
+                return err;
+            };
+        } else {
+            log.info("Thread {d} no message available, returning empty message", .{thread_id});
+
+            queued_message = self.allocator.dupe(u8, "") catch |err| {
+                return err;
+            };
+        }
+
+        return queued_message.?;
     }
 
-    fn close_connection(self: *Self, conn_id: u64, closer_is_client: bool, allocator: mem.Allocator) void {
+    pub fn close_connection(self: *Self, conn_id: u64, closer_is_client: bool, allocator: mem.Allocator) void {
         const thread_id = std.Thread.getCurrentId();
-        log.info("Thread {d} starting close_connection for id {}", .{ thread_id, conn_id });
+        log.info("Thread {d} closing connection {d}", .{ thread_id, conn_id });
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -446,7 +490,7 @@ pub const SimController = struct {
             log.info("Thread {d} connection not found", .{thread_id});
             return;
         }
-        const conn_state = conn_state_ptr.?;
+        var conn_state = conn_state_ptr.?;
 
         log.info("Thread {d} updating connection state", .{thread_id});
         if (closer_is_client) {
@@ -455,43 +499,35 @@ pub const SimController = struct {
             conn_state.server_closed = true;
         }
 
-        // Check if both sides are closed
         if (conn_state.client_closed and conn_state.server_closed) {
             log.info("Thread {d} both sides closed, cleaning up", .{thread_id});
 
-            // Remove from map first while holding mutex
-            const removed_state = self.connections.fetchRemove(conn_id).?.value;
+            var client_queue = &conn_state.client_queue;
+            var server_queue = &conn_state.server_queue;
 
-            // Signal any waiting receivers while holding mutex
-            removed_state.client_queue.cond.signal();
-            removed_state.server_queue.cond.signal();
+            _ = self.connections.remove(conn_id);
 
-            // Release mutex before deinit
+            client_queue.cond.signal();
+            server_queue.cond.signal();
+
             self.mutex.unlock();
             defer self.mutex.lock();
 
-            // Now safe to deinit since no other thread can access this state
-            removed_state.client_queue.deinit(allocator);
-            removed_state.server_queue.deinit(allocator);
+            client_queue.deinit(allocator);
+            server_queue.deinit(allocator);
         } else {
-            // Only one side closed, just signal the other side
-            const queue_to_signal = if (closer_is_client)
-                &conn_state.server_queue // Client closed, signal server
+            var queue_to_signal = if (closer_is_client)
+                &conn_state.server_queue
             else
-                &conn_state.client_queue; // Server closed, signal client
+                &conn_state.client_queue;
 
-            // Signal while holding mutex
             queue_to_signal.cond.signal();
         }
     }
 };
 
-const listen = @import("sim.zig").listen;
-const connect = @import("sim.zig").connect;
-
 test "sim: basic connect accept send receive" {
-    // Test is internal, keep disabled for now
-    if (true) return;
+    if (true) return; // disabled for now
 
     var controller = SimController.init(testing.allocator);
     defer controller.deinit();
@@ -502,7 +538,7 @@ test "sim: basic connect accept send receive" {
     const server_thread = try std.Thread.spawn(.{}, struct {
         fn server_fn(ctx: ServerData) !void {
             log.info("Server: Starting", .{});
-            var listener = try listen(ctx.controller, ctx.allocator);
+            var listener = try ctx.controller.listen(ctx.allocator);
             defer listener.close();
 
             log.info("Server: Waiting for accept...", .{});
@@ -526,7 +562,7 @@ test "sim: basic connect accept send receive" {
     std.time.sleep(10 * std.time.ns_per_ms);
 
     log.info("Client: Connecting...", .{});
-    var client_conn = try connect(&controller, testing.allocator);
+    var client_conn = try controller.connect(testing.allocator);
     log.info("Client: Connected id={d}", .{client_conn.id});
     defer client_conn.close();
 

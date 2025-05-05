@@ -83,7 +83,7 @@ pub fn ClientType(comptime ConnectionType: type) type {
 
             var send_buffer = std.ArrayList(u8).init(req_allocator);
 
-            framing.write_framed_message(
+            try framing.write_framed_message(
                 send_buffer.writer(),
                 req_allocator,
                 request_header,
